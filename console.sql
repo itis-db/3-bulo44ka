@@ -108,7 +108,7 @@ INSERT INTO article_tags VALUES
                              (5, 4), (5, 6);
 
 -- Полнотекстовый поиск по русскому языку
-EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+EXPLAIN ANALYZE
 SELECT
     article_id,
     title,
@@ -120,8 +120,10 @@ WHERE to_tsvector('russian', title || ' ' || content) @@
       plainto_tsquery('russian', 'поиск индексов')
 ORDER BY relevance DESC;
 
+-- https://explain.tensor.ru/archive/explain/d371d8a456bb1546957f6072583beaad:0:2026-04-06
+
 -- Поиск по началу слова с помощью триграмм
-EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+EXPLAIN ANALYZE
 SELECT
     article_id,
     title,
@@ -133,17 +135,19 @@ WHERE title % 'полнотекст'  -- Оператор схожести
 ORDER BY similarity_score DESC
 LIMIT 10;
 
+-- https://explain.tensor.ru/archive/explain/4b8a08933de4d0d264d61733090619c2:0:2026-04-06
+
 -- Максимально релевантные результаты
-EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+EXPLAIN ANALYZE
 WITH fts_search AS (
     SELECT
         article_id,
         title,
         ts_rank(to_tsvector('russian', title || ' ' || content),
-                websearch_to_tsquery('russian', 'postgresql оптимизация')) AS fts_score
+                to_tsquery('russian', 'postgresql & оптимизация')) AS fts_score
     FROM articles
     WHERE to_tsvector('russian', title || ' ' || content) @@
-          websearch_to_tsquery('russian', 'postgresql оптимизация')
+          to_tsquery('russian', 'postgresql & оптимизация')
 )
 SELECT
     a.article_id,
@@ -152,12 +156,14 @@ SELECT
     COALESCE(fts_score, 0) as relevance
 FROM articles a
          LEFT JOIN fts_search f USING (article_id)
-WHERE a.title % 'postgre' OR fts_score > 0
+WHERE similarity(a.title, 'postgre') > 0.2 OR fts_score > 0
 ORDER BY relevance DESC, a.views_count DESC
 LIMIT 20;
 
+-- https://explain.tensor.ru/archive/explain/0732f2bd61e9fc7492a10740a493354a:0:2026-04-06
+
 -- Сложный поиск с фильтрацией
-EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+EXPLAIN ANALYZE
 SELECT
     a.article_id,
     a.title,
@@ -173,30 +179,42 @@ WHERE to_tsvector('russian', a.title || ' ' || a.content) @@
       to_tsquery('russian', 'нейросеть | обучение')
 ORDER BY relevance DESC;
 
--- Тест 1: Поиск по слову с морфологией ("индексах" -> "индекс")
-SELECT title, ts_rank_cd(to_tsvector('russian', content),
-                         plainto_tsquery('russian', 'индексах')) as relevance
-FROM articles
-WHERE to_tsvector('russian', content) @@ plainto_tsquery('russian', 'индексах');
+--https://explain.tensor.ru/archive/explain/0cadd122e7bcb971ab083cd5189fa71c:0:2026-04-06
 
--- Тест 2: Поиск по частичному совпадению "полно"
-SELECT title, similarity(title, 'полно') as sim
+-- Тест 1: Поиск по слову с морфологией
+SELECT
+    title,
+    ts_rank_cd(to_tsvector('russian', content),
+               to_tsquery('russian', 'индексах')) as relevance
 FROM articles
-WHERE title % 'полно'
+WHERE to_tsvector('russian', content) @@ to_tsquery('russian', 'индексах');
+
+-- Тест 2: Поиск по частичному совпадению с триграммами
+SELECT
+    title,
+    similarity(title, 'полно') as sim
+FROM articles
+WHERE similarity(title, 'полно') > 0.1
 ORDER BY sim DESC;
 
--- Тест 3: Поиск фразы
-SELECT title FROM articles
-WHERE to_tsvector('russian', content) @@ phraseto_tsquery('russian', 'полнотекстовый поиск');
+-- Тест 3: Поиск фразы (через оператор &)
+SELECT title
+FROM articles
+WHERE to_tsvector('russian', content) @@
+      to_tsquery('russian', 'полнотекстовый & поиск');
 
--- Получите детальный план для анализа
-EXPLAIN (ANALYZE, BUFFERS, TIMING, FORMAT JSON)
+
+-- Базовый полнотекстовый поиск
+EXPLAIN ANALYZE
 SELECT
     article_id,
     title,
+    content,
     ts_rank(to_tsvector('russian', title || ' ' || content),
-            websearch_to_tsquery('russian', 'оптимизация postgresql')) as relevance
+            to_tsquery('russian', 'поиск & индексов')) AS relevance
 FROM articles
 WHERE to_tsvector('russian', title || ' ' || content) @@
-      websearch_to_tsquery('russian', 'оптимизация postgresql')
+      to_tsquery('russian', 'поиск & индексов')
 ORDER BY relevance DESC;
+
+-- https://explain.tensor.ru/archive/explain/153246a1a8448b6b1fce35a6ee43b610:0:2026-04-06
