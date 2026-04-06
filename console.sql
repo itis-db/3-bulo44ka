@@ -1,92 +1,202 @@
-CREATE TABLE users (
-                       id SERIAL PRIMARY KEY,
-                       username VARCHAR(100) NOT NULL,
-                       email VARCHAR(150) NOT NULL UNIQUE
-);
-
-CREATE TABLE articles (
-                          id SERIAL PRIMARY KEY,
-                          title TEXT NOT NULL,
-                          content TEXT NOT NULL,
-                          author_id INT NOT NULL,
-                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                          FOREIGN KEY (author_id) REFERENCES users(id)
-);
-
-CREATE TABLE categories (
-                            id SERIAL PRIMARY KEY,
-                            name VARCHAR(100) NOT NULL UNIQUE
-);
-
-CREATE TABLE article_categories (
-                                    article_id INT,
-                                    category_id INT,
-
-                                    PRIMARY KEY (article_id, category_id),
-
-                                    FOREIGN KEY (article_id) REFERENCES articles(id),
-                                    FOREIGN KEY (category_id) REFERENCES categories(id)
-);
-
-CREATE TABLE comments (
-                          id SERIAL PRIMARY KEY,
-                          article_id INT NOT NULL,
-                          user_id INT NOT NULL,
-                          content TEXT NOT NULL,
-                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                          FOREIGN KEY (article_id) REFERENCES articles(id),
-                          FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
-
-CREATE INDEX idx_articles_author ON articles(author_id);
-CREATE INDEX idx_comments_article ON comments(article_id);
-CREATE INDEX idx_comments_user ON comments(user_id);
-
-
-CREATE INDEX idx_articles_created ON articles(created_at);
-
-ALTER TABLE articles ADD COLUMN search_vector tsvector;
-
-UPDATE articles
-SET search_vector =
-        to_tsvector('russian', coalesce(title, '') || ' ' || coalesce(content, ''));
-
-CREATE INDEX idx_articles_search
-    ON articles USING GIN(search_vector);
-
-SELECT id, title,
-       ts_rank(search_vector, plainto_tsquery('russian', 'поиск статьи')) AS rank
-FROM articles
-WHERE search_vector @@ plainto_tsquery('russian', 'поиск статьи')
-ORDER BY rank DESC;
-
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
 
-CREATE INDEX idx_articles_title_trgm
-    ON articles USING GIN (title gin_trgm_ops);
+-- 1. Таблица авторов
+CREATE TABLE authors (
+                         author_id SERIAL PRIMARY KEY,
+                         full_name VARCHAR(100) NOT NULL,
+                         email VARCHAR(100) UNIQUE NOT NULL,
+                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
-CREATE INDEX idx_articles_content_trgm
-    ON articles USING GIN (content gin_trgm_ops);
+-- 2. Таблица категорий
+CREATE TABLE categories (
+                            category_id SERIAL PRIMARY KEY,
+                            category_name VARCHAR(50) NOT NULL UNIQUE,
+                            description TEXT
+);
 
-SELECT *
+-- 3. Главная таблица статей (3НФ: все атрибуты зависят от article_id)
+CREATE TABLE articles (
+                          article_id SERIAL PRIMARY KEY,
+                          title VARCHAR(200) NOT NULL,
+                          content TEXT NOT NULL,
+                          summary TEXT,
+                          author_id INTEGER NOT NULL REFERENCES authors(author_id),
+                          category_id INTEGER NOT NULL REFERENCES categories(category_id),
+                          views_count INTEGER DEFAULT 0,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. Таблица для тегов (связь многие-ко-многим)
+CREATE TABLE tags (
+                      tag_id SERIAL PRIMARY KEY,
+                      tag_name VARCHAR(50) NOT NULL UNIQUE
+);
+
+-- 5. Связующая таблица (для соблюдения 3НФ)
+CREATE TABLE article_tags (
+                              article_id INTEGER REFERENCES articles(article_id) ON DELETE CASCADE,
+                              tag_id INTEGER REFERENCES tags(tag_id) ON DELETE CASCADE,
+                              PRIMARY KEY (article_id, tag_id)
+);
+
+-- Индексы для внешних ключей и часто используемых полей
+CREATE INDEX idx_articles_author_id ON articles(author_id);
+CREATE INDEX idx_articles_category_id ON articles(category_id);
+CREATE INDEX idx_articles_created_at ON articles(created_at DESC);
+CREATE INDEX idx_articles_views_count ON articles(views_count DESC);
+
+-- GIN индекс для полнотекстового поиска с русским словарём
+CREATE INDEX idx_articles_fts ON articles
+    USING GIN (to_tsvector('russian', title || ' ' || COALESCE(content, '')));
+
+-- GIN индекс для триграмм (поиск по частичному совпадению)
+CREATE INDEX idx_articles_title_trgm ON articles USING GIN (title gin_trgm_ops);
+CREATE INDEX idx_articles_content_trgm ON articles USING GIN (content gin_trgm_ops);
+
+-- Комбинированный индекс для релевантности и сортировки
+CREATE INDEX idx_articles_relevance ON articles(views_count DESC, created_at DESC);
+
+-- Добавление авторов
+INSERT INTO authors (full_name, email) VALUES
+                                           ('Иван Петров', 'ivan.petrov@example.com'),
+                                           ('Мария Сидорова', 'maria.s@example.com'),
+                                           ('Алексей Смирнов', 'alex.smirnov@example.com'),
+                                           ('Елена Козлова', 'elena.koz@example.com');
+
+-- Добавление категорий
+INSERT INTO categories (category_name, description) VALUES
+                                                        ('Программирование', 'Статьи о разработке ПО'),
+                                                        ('Базы данных', 'PostgreSQL, MySQL, оптимизация'),
+                                                        ('Искусственный интеллект', 'ML, нейросети, ChatGPT'),
+                                                        ('Веб-разработка', 'Frontend, backend, API');
+
+-- Добавление статей с реалистичным содержанием
+INSERT INTO articles (title, content, summary, author_id, category_id, views_count) VALUES
+                                                                                        ('Оптимизация запросов в PostgreSQL',
+                                                                                         'Полнотекстовый поиск в PostgreSQL позволяет эффективно работать с текстовыми данными. Использование GIN индексов значительно ускоряет поиск. Для русского языка необходимо настроить конфигурацию russian.',
+                                                                                         'Как ускорить полнотекстовый поиск', 1, 2, 150),
+
+                                                                                        ('Введение в машинное обучение',
+                                                                                         'Машинное обучение это подраздел искусственного интеллекта. Нейронные сети обучаются на больших объемах данных. PyTorch и TensorFlow основные инструменты.',
+                                                                                         'Основы ML для начинающих', 2, 3, 230),
+
+                                                                                        ('Создание REST API на Python',
+                                                                                         'FastAPI и Django REST framework позволяют быстро создавать высокопроизводительные API. Важно правильно обрабатывать ошибки и валидировать данные.',
+                                                                                         'Практическое руководство по API', 3, 4, 89),
+
+                                                                                        ('Индексы в базах данных',
+                                                                                         'B-tree индексы подходят для точного поиска, а GIN для полнотекстового. Триграммы помогают искать по частичному совпадению слов.',
+                                                                                         'Типы индексов и их применение', 1, 2, 312),
+
+                                                                                        ('Нейросети для обработки текста',
+                                                                                         'Трансформеры и BERT изменили подход к обработке естественного языка. Полнотекстовый поиск с морфологией русского языка требует настройки словарей.',
+                                                                                         'Современные NLP подходы', 4, 3, 176);
+
+-- Добавление тегов
+INSERT INTO tags (tag_name) VALUES
+                                ('postgresql'), ('индексы'), ('python'), ('ml'), ('api'), ('nlp');
+
+-- Связь статей с тегами
+INSERT INTO article_tags VALUES
+                             (1, 1), (1, 2),
+                             (2, 4), (2, 6),
+                             (3, 3), (3, 5),
+                             (4, 1), (4, 2),
+                             (5, 4), (5, 6);
+
+-- Полнотекстовый поиск по русскому языку
+EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+SELECT
+    article_id,
+    title,
+    content,
+    ts_rank(to_tsvector('russian', title || ' ' || content),
+            plainto_tsquery('russian', 'поиск индексов')) AS relevance
 FROM articles
-WHERE title ILIKE '%поиск%'
-ORDER BY similarity(title, 'поиск') DESC;
+WHERE to_tsvector('russian', title || ' ' || content) @@
+      plainto_tsquery('russian', 'поиск индексов')
+ORDER BY relevance DESC;
 
-INSERT INTO users (username, email) VALUES
-                                        ('ivan', 'ivan@mail.com'),
-                                        ('anna', 'anna@mail.com');
-
-INSERT INTO articles (title, content, author_id) VALUES
-                                                     ('Поиск в PostgreSQL', 'Полнотекстовый поиск позволяет искать слова...', 1),
-                                                     ('Индексы в базах данных', 'GIN и B-tree индексы ускоряют поиск...', 2),
-                                                     ('Триграммы в PostgreSQL', 'pg_trgm используется для нечеткого поиска...', 1);
-EXPLAIN ANALYZE
-SELECT *
+-- Поиск по началу слова с помощью триграмм
+EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+SELECT
+    article_id,
+    title,
+    content,
+    similarity(title, 'полнотекст') AS similarity_score
 FROM articles
-WHERE search_vector @@ plainto_tsquery('russian', 'поиск');
+WHERE title % 'полнотекст'  -- Оператор схожести
+   OR title LIKE 'полнотекст%'
+ORDER BY similarity_score DESC
+LIMIT 10;
 
+-- Максимально релевантные результаты
+EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+WITH fts_search AS (
+    SELECT
+        article_id,
+        title,
+        ts_rank(to_tsvector('russian', title || ' ' || content),
+                websearch_to_tsquery('russian', 'postgresql оптимизация')) AS fts_score
+    FROM articles
+    WHERE to_tsvector('russian', title || ' ' || content) @@
+          websearch_to_tsquery('russian', 'postgresql оптимизация')
+)
+SELECT
+    a.article_id,
+    a.title,
+    a.views_count,
+    COALESCE(fts_score, 0) as relevance
+FROM articles a
+         LEFT JOIN fts_search f USING (article_id)
+WHERE a.title % 'postgre' OR fts_score > 0
+ORDER BY relevance DESC, a.views_count DESC
+LIMIT 20;
 
+-- Сложный поиск с фильтрацией
+EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
+SELECT
+    a.article_id,
+    a.title,
+    a.content,
+    c.category_name,
+    au.full_name as author,
+    ts_rank(to_tsvector('russian', a.title || ' ' || a.content),
+            to_tsquery('russian', 'нейросеть | обучение')) as relevance
+FROM articles a
+         JOIN categories c ON a.category_id = c.category_id
+         JOIN authors au ON a.author_id = au.author_id
+WHERE to_tsvector('russian', a.title || ' ' || a.content) @@
+      to_tsquery('russian', 'нейросеть | обучение')
+ORDER BY relevance DESC;
+
+-- Тест 1: Поиск по слову с морфологией ("индексах" -> "индекс")
+SELECT title, ts_rank_cd(to_tsvector('russian', content),
+                         plainto_tsquery('russian', 'индексах')) as relevance
+FROM articles
+WHERE to_tsvector('russian', content) @@ plainto_tsquery('russian', 'индексах');
+
+-- Тест 2: Поиск по частичному совпадению "полно"
+SELECT title, similarity(title, 'полно') as sim
+FROM articles
+WHERE title % 'полно'
+ORDER BY sim DESC;
+
+-- Тест 3: Поиск фразы
+SELECT title FROM articles
+WHERE to_tsvector('russian', content) @@ phraseto_tsquery('russian', 'полнотекстовый поиск');
+
+-- Получите детальный план для анализа
+EXPLAIN (ANALYZE, BUFFERS, TIMING, FORMAT JSON)
+SELECT
+    article_id,
+    title,
+    ts_rank(to_tsvector('russian', title || ' ' || content),
+            websearch_to_tsquery('russian', 'оптимизация postgresql')) as relevance
+FROM articles
+WHERE to_tsvector('russian', title || ' ' || content) @@
+      websearch_to_tsquery('russian', 'оптимизация postgresql')
+ORDER BY relevance DESC;
